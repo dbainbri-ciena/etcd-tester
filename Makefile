@@ -18,6 +18,15 @@ help:  ## Display this help
 	@echo "Usage: make \033[36m<target>\033[0m"
 	@awk 'BEGIN {FS = ":.*## *"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "\033[36m  %s\033[0m,%s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST) | column -s , -c 2 -tx
 
+build: ## Build the etcd tester client
+	(cd client; go build -o ../etcdtester ./main.go)
+
+clean: ## Delete build artifacts
+	rm -rf ./etcdtester
+
+kind: ## install kind
+	go get sigs.k8s.io/kind
+
 cluster-up: ## Create the kind cluster for testing
 	kind create cluster --config kind-cluster.yaml --name etcd
 
