@@ -128,17 +128,25 @@ func main() {
 func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 	var min, max, avg, last time.Duration
 	count := int64(0)
-
 	// connect to etcd
-	cli, err := clientv3.New(clientv3.Config{
+	defragCli, err := clientv3.New(clientv3.Config{
+		Endpoints:   c.endpoints,
+		DialTimeout: c.DefragTimeout,
+	})
+	if err != nil {
+		log.Fatalf("ERROR: unable to create connection to KV store for defragmentation using '%s': '%s'\n",
+			c.endpoints, err.Error())
+	}
+	defer defragCli.Close()
+	sizeCli, err := clientv3.New(clientv3.Config{
 		Endpoints:   c.endpoints,
 		DialTimeout: c.EtcdTimeout,
 	})
 	if err != nil {
-		log.Fatalf("ERROR: unable to connect to KV store at '%s': '%s'\n",
+		log.Fatalf("ERROR: unable to create connection to KV store for db size telemetry using '%s': '%s'\n",
 			c.endpoints, err.Error())
 	}
-	defer cli.Close()
+	defer sizeCli.Close()
 
 	// output data header
 	fmt.Fprintf(os.Stdout, "Time,Minimum,Maximum,Last,Average,Size\n")
@@ -161,7 +169,7 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 				for _, ep := range c.endpoints {
 					ctx, cancel := context.WithTimeout(context.Background(),
 						c.DefragTimeout)
-					_, err := cli.Defragment(ctx, ep)
+					_, err = defragCli.Defragment(ctx, ep)
 					cancel()
 					if err != nil {
 						log.Fatalf("ERROR: unable to defragment etcd endpoint '%s': '%s'\n",
@@ -171,7 +179,6 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 				}
 			}()
 		case <-reportTicker.C:
-
 			// output completeness stats to stderr
 			complete := count * int64(100) / int64(c.PutCount)
 			fmt.Fprintf(os.Stderr, "%d%% - %d of %d\n",
@@ -184,17 +191,23 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 
 			// calculate db size as average from each endpoint
 			dbSize := int64(0)
+			dbCnt := int64(0)
 			for _, ep := range c.endpoints {
 				ctx, cancel := context.WithTimeout(context.Background(), c.EtcdTimeout)
-				status, err := cli.Status(ctx, ep)
+				status, err := sizeCli.Status(ctx, ep)
 				cancel()
 				if err != nil {
 					log.Fatalf("ERROR: unable to read KV storage size from '%s': '%s'\n",
 						ep, err.Error())
 				}
 				dbSize += status.DbSize
+				dbCnt++
 			}
-			dbSize = dbSize / int64(len(c.endpoints))
+			if dbCnt == 0 {
+				dbSize = 0
+			} else {
+				dbSize = dbSize / dbCnt
+			}
 
 			// output stats as either human readable (with units) or
 			// as base units milliseconds/bytes
@@ -280,8 +293,8 @@ func (c *configSpec) runWorker(id int, ch chan<- time.Duration, wg *sync.WaitGro
 		endTime := time.Now()
 		cancel()
 		if err != nil {
-			log.Fatalf("ERROR: unable to complete PUT: '%s', timeout is '%v'\n",
-				err.Error(), c.EtcdTimeout)
+			log.Fatalf("ERROR: unable to complete PUT: '%s', timeout is '%v' taking '%v'\n",
+				err.Error(), c.EtcdTimeout, endTime.Sub(startTime))
 		}
 
 		// send the time of the PUT to the channel to be collated
