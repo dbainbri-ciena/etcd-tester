@@ -18,6 +18,19 @@ help:  ## Display this help
 	@echo "Usage: make \033[36m<target>\033[0m"
 	@awk 'BEGIN {FS = ":.*## *"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "\033[36m  %s\033[0m,%s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST) | column -s , -c 2 -tx
 
+prereqs: ## Helper commands to install things you need (ubuntu)
+	sudo apt install -y make
+	sudo snap install --classic go
+	sudo snap install --classic docker
+	sudo snap install --classic jq
+	sudo snap install --classic kubectl
+	sudo snap install --classic helm
+	sudo usermod -aG docker ${USER}
+	@echo '# You will need to log out and log in again for group setting to take'
+	@echo '# then execute the following commands:'
+	@echo ''
+	@echo 'export PATH=$$(go env GOPATH)/bin:$$PATH'
+
 build: ## Build the etcd tester client
 	(cd client; go build -o ../etcdtester ./main.go)
 
