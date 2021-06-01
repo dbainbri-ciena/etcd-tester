@@ -213,14 +213,14 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 			// as base units milliseconds/bytes
 			if c.HumanReadable {
 				fmt.Fprintf(os.Stdout, "%s,%v,%v,%v,%v,%v\n",
-					time.Now().Format("15.04.05"),
+					time.Now().Format("15:04:05"),
 					min, max, last,
 					time.Duration(int64(avg)/count),
 					bs.New(float64(dbSize)),
 				)
 			} else {
 				fmt.Fprintf(os.Stdout, "%s,%d,%d,%d,%d,%d\n",
-					time.Now().Format("15.04.05"),
+					time.Now().Format("15:04:05"),
 					min.Milliseconds(),
 					max.Milliseconds(),
 					last.Milliseconds(),
