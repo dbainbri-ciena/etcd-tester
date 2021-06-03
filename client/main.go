@@ -18,10 +18,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,9 +33,47 @@ import (
 	bs "github.com/inhies/go-bytesize"
 )
 
+type Frequency struct {
+	Count  int
+	Period time.Duration
+}
+
+func (f *Frequency) Set(s string) error {
+	parts := strings.Split(s, "/")
+	if len(parts) != 2 {
+		return errors.New("bad-format")
+	}
+
+	count, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return err
+	}
+
+	period, err := time.ParseDuration(parts[1])
+	if err != nil {
+		return err
+	}
+
+	f.Count = count
+	f.Period = period
+
+	return nil
+}
+
+func (f *Frequency) String() string {
+	return fmt.Sprintf("%d/%v", f.Count, f.Period)
+}
+
 type configSpec struct {
-	PutCount       int
-	WorkerCount    int
+	PutCondition   int
+	PutFrequency   Frequency
+	PutWorkerCount int
+	GetCondition   int
+	GetFrequency   Frequency
+	GetWorkerCount int
+	DelCondition   int
+	DelFrequency   Frequency
+	DelWorkerCount int
 	KeyCount       int
 	ReportInterval time.Duration
 	DefragInterval time.Duration
@@ -46,13 +87,91 @@ type configSpec struct {
 	endpoints []string
 }
 
+const (
+	STOP int = iota
+	PUT
+	GET
+	DEL
+)
+
+var (
+	OpNames = []string{"STOP", "PUT", "GET", "DEL"}
+)
+
+type timingSample struct {
+	Op       int
+	Duration time.Duration
+}
+
+type stat struct {
+	count               int64
+	min, max, last, avg time.Duration
+}
+
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func avg(sum time.Duration, count int64) time.Duration {
+	if count > 0 {
+		return time.Duration(sum.Milliseconds()/count) * time.Millisecond
+	}
+	return 0
+}
+
+func (s *stat) Update(sample timingSample) {
+	// update the telemetry information
+	if s.count == 0 {
+		s.min = sample.Duration
+		s.max = sample.Duration
+	}
+	if sample.Duration < s.min {
+		s.min = sample.Duration
+	}
+	if sample.Duration > s.max {
+		s.max = sample.Duration
+	}
+	s.last = sample.Duration
+	s.avg += sample.Duration
+	s.count++
+}
+
+func setFlagDefault(name, value string) {
+	flag.Lookup(name).DefValue = value
+	flag.Set(name, flag.Lookup(name).DefValue)
+}
+
 func main() {
 
+	// If we don't seed then go uses a constant seed and
+	// each run is identical
+	rand.Seed(time.Now().UnixNano())
+
 	var config configSpec
-	flag.IntVar(&config.PutCount, "puts", 1000,
-		"total number of PUT requests to KV store")
-	flag.IntVar(&config.WorkerCount, "workers", 10,
+	flag.IntVar(&config.PutCondition, "pcon", 1000,
+		"number of PUT requests to KV store to complete test")
+	flag.Var(&config.PutFrequency, "puts",
+		"number of PUT requests to KV store attempted over the specified period")
+	setFlagDefault("puts", "1000/1m")
+	flag.IntVar(&config.PutWorkerCount, "putters", 10,
 		"number of worker threads to used to make PUT requests")
+	flag.IntVar(&config.GetCondition, "gcon", 1000,
+		"number of GET requests to KV store to complete test")
+	flag.Var(&config.GetFrequency, "gets",
+		"number of GET requests to KV store attempted over the specified period")
+	setFlagDefault("gets", "1000/1m")
+	flag.IntVar(&config.GetWorkerCount, "getters", 10,
+		"number of worker threads to used to make GET requests")
+	flag.IntVar(&config.DelCondition, "dcon", 1000,
+		"number of DEL requests to KV store to complete test")
+	flag.Var(&config.DelFrequency, "dels",
+		"number of DEL requests to KV store attempted per over the specified period")
+	setFlagDefault("dels", "1000/1m")
+	flag.IntVar(&config.DelWorkerCount, "dellers", 10,
+		"number of worker threads to used to make DEL requests")
 	flag.IntVar(&config.KeyCount, "keys", 10,
 		"number of keys that should be used for PUT requests")
 	flag.DurationVar(&config.ReportInterval, "report", 5*time.Second,
@@ -97,37 +216,82 @@ func main() {
 	// Create a wait group for the workers and one for the routine that
 	// outputs status. This way we can make sure all processing is done
 	// before we exit
-	var workerWG, statsWG sync.WaitGroup
-	workerWG.Add(config.WorkerCount)
+	var workWG, statsWG sync.WaitGroup
+	workWG.Add(config.PutWorkerCount +
+		config.GetWorkerCount + config.DelWorkerCount)
 	statsWG.Add(1)
 
 	// Create a channel to use to communicate between workers and
 	// the routine for stats output
-	ch := make(chan time.Duration, 5000)
+	ch := make(chan timingSample, 5000)
+	defer close(ch)
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	// Kick off stats outputer
 	go config.runStatus(ch, &statsWG)
 
+	// We want to make sure that we PUT the number of keys that
+	// was specified as the command line option, so we will divide
+	// the keyspace by the number of workers. Once the required number
+	// of keys are PUT we will go back to random keys. First we create
+	// an shuffle the list of keys
+	perWorker := config.KeyCount / config.PutWorkerCount
+
+	jsonString := string(jsonBytes)
 	// Kick off workers
-	for j := 0; j < config.WorkerCount; j++ {
-		go config.runWorker(j, ch, &workerWG, string(jsonBytes))
+	for j := 0; j < config.PutWorkerCount; j++ {
+
+		// Create a range of keys for each worker
+		keyIdx := j * perWorker
+		endIdx := (j + 1) * perWorker
+		go config.runWorker(ctx, PUT, config.PutFrequency, ch, &workWG,
+			func(ctx context.Context, cli *clientv3.Client, key string) error {
+				var err error
+				if keyIdx < endIdx {
+					_, err = cli.Put(ctx,
+						fmt.Sprintf("/test-%d", keyIdx),
+						jsonString)
+					keyIdx++
+				} else {
+					_, err = cli.Put(ctx, key, jsonString)
+				}
+				return err
+			})
 	}
 
-	// Wait for PUT threads to complete
-	workerWG.Wait()
+	for j := 0; j < config.GetWorkerCount; j++ {
+		go config.runWorker(ctx, GET, config.GetFrequency, ch, &workWG,
+			func(ctx context.Context, cli *clientv3.Client, key string) error {
+				_, err := cli.Get(ctx, key)
+				return err
+			})
+	}
 
-	// Append (stop) to channel so stats processor knows
-	// not more samples will be added and then wait for
-	// stats process to complete.
-	ch <- time.Duration(-1)
+	for j := 0; j < config.DelWorkerCount; j++ {
+		go config.runWorker(ctx, DEL, config.DelFrequency, ch, &workWG,
+			func(ctx context.Context, cli *clientv3.Client, key string) error {
+				_, err := cli.Delete(ctx, key)
+				return err
+			})
+	}
+
 	statsWG.Wait()
+	cancel()
+
+	// Wait for PUT threads to complete
+	workWG.Wait()
 }
 
 // runStatus periodically outputs telemetry information about the
 // test run as well as periodically deframents the store
-func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
-	var min, max, avg, last time.Duration
-	count := int64(0)
+func (c *configSpec) runStatus(ch <-chan timingSample, wg *sync.WaitGroup) {
+	stats := map[int]*stat{
+		STOP: &stat{},
+		PUT:  &stat{},
+		GET:  &stat{},
+		DEL:  &stat{},
+	}
 	// connect to etcd
 	defragCli, err := clientv3.New(clientv3.Config{
 		Endpoints:   c.endpoints,
@@ -149,7 +313,7 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 	defer sizeCli.Close()
 
 	// output data header
-	fmt.Fprintf(os.Stdout, "Time,Minimum,Maximum,Last,Average,Size\n")
+	fmt.Fprintf(os.Stdout, "TIME,PUT_MINIMUM,PUT_MAXIMUM,PUT_LAST,PUT_AVERAGE,GET_MINIMUM,GET_MAXIMUM,GET_LAST,GET_AVERAGE,DEL_MAXIMUM,DEL_MINIMUM,DEL_LAST,DEL_AVERAGE,DB_SIZE\n")
 
 	// tickers for periodic operations like report output and defragmentation
 	reportTicker := time.NewTicker(c.ReportInterval)
@@ -179,13 +343,21 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 				}
 			}()
 		case <-reportTicker.C:
+
+			total := c.PutCondition + c.GetCondition + c.DelCondition
+			count := min(stats[PUT].count, int64(c.PutCondition)) +
+				min(stats[GET].count, int64(c.GetCondition)) +
+				min(stats[DEL].count, int64(c.DelCondition))
 			// output completeness stats to stderr
-			complete := count * int64(100) / int64(c.PutCount)
-			fmt.Fprintf(os.Stderr, "%d%% - %d of %d\n",
-				complete, count, c.PutCount)
+			complete := count * int64(100) / int64(total)
+			fmt.Fprintf(os.Stderr, "%d%% - %d/%d    %d/%d   %d/%d\n",
+				complete,
+				stats[PUT].count, c.PutCondition,
+				stats[GET].count, c.GetCondition,
+				stats[DEL].count, c.DelCondition)
 
 			// if we don't have any data, then no need to output anything else
-			if count == 0 {
+			if stats[PUT].count == 0 {
 				break
 			}
 
@@ -212,52 +384,135 @@ func (c *configSpec) runStatus(ch <-chan time.Duration, wg *sync.WaitGroup) {
 			// output stats as either human readable (with units) or
 			// as base units milliseconds/bytes
 			if c.HumanReadable {
-				fmt.Fprintf(os.Stdout, "%s,%v,%v,%v,%v,%v\n",
+				fmt.Fprintf(os.Stdout, "%s,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v\n",
 					time.Now().Format("15:04:05"),
-					min, max, last,
-					time.Duration(int64(avg)/count),
+					stats[PUT].min, stats[PUT].max, stats[PUT].last,
+					avg(stats[PUT].avg, stats[PUT].count),
+					stats[GET].min, stats[GET].max, stats[GET].last,
+					avg(stats[GET].avg, stats[GET].count),
+					stats[DEL].min, stats[DEL].max, stats[DEL].last,
+					avg(stats[DEL].avg, stats[DEL].count),
 					bs.New(float64(dbSize)),
 				)
 			} else {
-				fmt.Fprintf(os.Stdout, "%s,%d,%d,%d,%d,%d\n",
+				fmt.Fprintf(os.Stdout, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 					time.Now().Format("15:04:05"),
-					min.Milliseconds(),
-					max.Milliseconds(),
-					last.Milliseconds(),
-					avg.Milliseconds()/count,
+					stats[PUT].min.Milliseconds(),
+					stats[PUT].max.Milliseconds(),
+					stats[PUT].last.Milliseconds(),
+					avg(stats[PUT].avg, stats[PUT].count).Milliseconds(),
+					stats[GET].min.Milliseconds(),
+					stats[GET].max.Milliseconds(),
+					stats[GET].last.Milliseconds(),
+					avg(stats[GET].avg, stats[GET].count).Milliseconds(),
+					stats[DEL].min.Milliseconds(),
+					stats[DEL].max.Milliseconds(),
+					stats[DEL].last.Milliseconds(),
+					avg(stats[DEL].avg, stats[DEL].count).Milliseconds(),
 					dbSize,
 				)
 			}
-		case sample, ok := <-ch:
 
-			// if the sample is -1, it means not more samples
-			// so we exit
-			if !ok || sample == time.Duration(-1) {
-				// signal all done
+			// Check exit conditions
+			if stats[PUT].count >= int64(c.PutCondition) &&
+				stats[GET].count >= int64(c.GetCondition) &&
+				stats[DEL].count >= int64(c.DelCondition) {
 				wg.Done()
 				return
 			}
-
-			// update the telemetry information
-			if count == 0 {
-				min = sample
-				max = sample
+		case sample := <-ch:
+			switch sample.Op {
+			case STOP:
+				// signal all done
+				wg.Done()
+				return
+			default:
+				stats[sample.Op].Update(sample)
 			}
-			if sample < min {
-				min = sample
-			}
-			if sample > max {
-				max = sample
-			}
-			last = sample
-			avg += sample
-			count++
 		}
 	}
 }
 
-// runWorker PUT, PUT as fast as you can
-func (c *configSpec) runWorker(id int, ch chan<- time.Duration, wg *sync.WaitGroup, jsonEntity string) {
+func (c *configSpec) withIntervalSpacer(ctx context.Context, target int, cli *clientv3.Client, frequency Frequency, spacer time.Duration, ch chan<- timingSample, work func(context.Context, *clientv3.Client, string) error) (int, time.Duration) {
+	period := time.NewTicker(frequency.Period)
+	defer period.Stop()
+	interval := time.NewTicker(spacer)
+	defer interval.Stop()
+	count := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, time.Duration(0)
+		case <-period.C:
+			// Period over, didn't complete work, return how many completed
+			return count, time.Duration(0)
+		case <-interval.C:
+			ctx, cancel := context.WithTimeout(context.Background(), c.EtcdTimeout)
+			// time the execution of the PUT
+			startTime := time.Now()
+			key := rand.Intn(c.KeyCount)
+			err := work(ctx, cli, fmt.Sprintf("/test-%d", key))
+			endTime := time.Now()
+			cancel()
+			if err != nil {
+				log.Fatalf("ERROR: unable to complete PUT: '%s', timeout is '%v' taking '%v'\n",
+					err.Error(), c.EtcdTimeout, endTime.Sub(startTime))
+			}
+			ch <- timingSample{
+				Op:       target,
+				Duration: endTime.Sub(startTime),
+			}
+			count++
+			if count > frequency.Count {
+				// Reached limit of work
+				startWait := time.Now()
+				<-period.C
+				endWait := time.Now()
+				return frequency.Count, endWait.Sub(startWait)
+			}
+		}
+	}
+}
+
+func (c *configSpec) noIntervalSpacer(ctx context.Context, target int, cli *clientv3.Client, frequency Frequency, ch chan<- timingSample, work func(context.Context, *clientv3.Client, string) error) (int, time.Duration) {
+	period := time.NewTicker(frequency.Period)
+	defer period.Stop()
+	for count := 0; count < frequency.Count; count++ {
+		select {
+		case <-ctx.Done():
+			return 0, time.Duration(0)
+		case <-period.C:
+			return count, time.Duration(0)
+		default:
+			ctx, cancel := context.WithTimeout(context.Background(), c.EtcdTimeout)
+			// time the execution of the PUT
+			startTime := time.Now()
+			key := rand.Intn(c.KeyCount)
+			err := work(ctx, cli, fmt.Sprintf("/test-%d", key))
+			endTime := time.Now()
+			cancel()
+			if err != nil {
+				log.Fatalf("ERROR: unable to complete PUT: '%s', timeout is '%v' taking '%v'\n",
+					err.Error(), c.EtcdTimeout, endTime.Sub(startTime))
+			}
+			ch <- timingSample{
+				Op:       target,
+				Duration: endTime.Sub(startTime),
+			}
+		}
+	}
+	startWait := time.Now()
+	select {
+	case <-ctx.Done():
+		return 0, time.Duration(0)
+	case <-period.C:
+		break
+	}
+	endWait := time.Now()
+	return frequency.Count, endWait.Sub(startWait)
+}
+
+func (c *configSpec) runWorker(ctx context.Context, target int, frequency Frequency, ch chan<- timingSample, wg *sync.WaitGroup, work func(context.Context, *clientv3.Client, string) error) {
 
 	// get etcd connection
 	cli, err := clientv3.New(clientv3.Config{
@@ -270,38 +525,40 @@ func (c *configSpec) runWorker(id int, ch chan<- time.Duration, wg *sync.WaitGro
 	}
 	defer cli.Close()
 
-	// pre-generate the key names so we don't have to do a fmt.Sprintf for
-	// each put
-	var keys []string
+	// Because we are executing on frequency we want to have an even spread
+	// as opposed to do all as fast as we can then wait. To implement this
+	// we use a sleep, knowing that the sleep
+	var spacer time.Duration
 
-	// note, if KeyCount isn't integer divisible by WorkerCount
-	// you may not get all the keys you expect
-	myKeyCount := int(c.KeyCount / c.WorkerCount)
-	for i := 0; i < myKeyCount; i++ {
-		keys = append(keys, fmt.Sprintf("/test-%d-%d", id, i))
-	}
-
-	// to our portion of the PUTs.
-	// note, if PutCount isn't integer divisible by WorkerCount
-	// you may not get all the PUTs you expect
-	for i := 0; i < c.PutCount/c.WorkerCount; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), c.EtcdTimeout)
-
-		// time the execution of the PUT
-		startTime := time.Now()
-		_, err = cli.Put(ctx, keys[i%myKeyCount], jsonEntity)
-		endTime := time.Now()
-		cancel()
-		if err != nil {
-			log.Fatalf("ERROR: unable to complete PUT: '%s', timeout is '%v' taking '%v'\n",
-				err.Error(), c.EtcdTimeout, endTime.Sub(startTime))
+	for {
+		var count int
+		var left time.Duration
+		select {
+		case <-ctx.Done():
+			wg.Done()
+			return
+		default:
+			if spacer > 0 {
+				count, left = c.withIntervalSpacer(ctx, target, cli, frequency, spacer, ch, work)
+			} else {
+				count, left = c.noIntervalSpacer(ctx, target, cli, frequency, ch, work)
+			}
+			if ctx.Err() != context.Canceled {
+				if frequency.Count > 1 {
+					if left > 0 {
+						spacer, _ = time.ParseDuration(fmt.Sprintf("%dns", spacer.Nanoseconds()+left.Nanoseconds()/int64(frequency.Count)))
+					} else {
+						if count != 0 {
+							if spacer != 0 {
+								ns := frequency.Period.Nanoseconds() / ((int64(frequency.Count) * (frequency.Period.Nanoseconds() / spacer.Nanoseconds())) / int64(count))
+								spacer, _ = time.ParseDuration(fmt.Sprintf("%dns", ns))
+							}
+						} else {
+							spacer = 0
+						}
+					}
+				}
+			}
 		}
-
-		// send the time of the PUT to the channel to be collated
-		delta := endTime.Sub(startTime)
-		ch <- delta
 	}
-
-	// signal all done
-	wg.Done()
 }

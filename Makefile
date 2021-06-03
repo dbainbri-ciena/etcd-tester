@@ -86,9 +86,14 @@ test-small: ## 10 keys - 10 workers - 1000 puts
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
 		--keys 10 \
-		--puts 1000 \
-		--report 500ms \
-		--workers 10 ${HUMAN}
+		--puts 10/1s \
+		--putters 1 \
+		--gets 10/1s \
+		--getters 1 \
+		--dels 10/1s \
+		--dellers 1 \
+		--pcon 50 --gcon 50 --dcon 50 \
+		--report 500ms ${HUMAN}
 
 test-medium: ## 1000 keys - 10 workers - 10000 puts
 	@./etcdtester \
@@ -98,9 +103,16 @@ test-medium: ## 1000 keys - 10 workers - 10000 puts
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
 		--keys 1000 \
-		--puts 10000 \
-		--report 5s \
-		--workers 10 ${HUMAN}
+		--puts 999999/5s \
+		--putters 10 \
+		--pcon 10000 \
+		--gets 999999/5s \
+		--getters 10 \
+		--gcon 10000 \
+		--dels 999999/5s \
+		--dellers 10 \
+		--dcon 10000 \
+		--report 5s ${HUMAN}
 
 test-medium-large: ## 1000 keys - 10 workers - 100000 puts
 	@./etcdtester \
@@ -110,9 +122,16 @@ test-medium-large: ## 1000 keys - 10 workers - 100000 puts
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
 		--keys 1000 \
-		--puts 100000 \
-		--report 5s \
-		--workers 10 ${HUMAN}
+		--puts 999999/5s \
+		--putters 10 \
+		--pcon 100000 \
+		--gets 999999/5s \
+		--getters 10 \
+		--gcon 100000 \
+		--dels 999999/5s \
+		--dellers 10 \
+		--dcon 100000 \
+		--report 5s ${HUMAN}
 
 test-large: ## 100000 keys - 10 workers - 500000 puts
 	@./etcdtester \
@@ -122,9 +141,16 @@ test-large: ## 100000 keys - 10 workers - 500000 puts
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
 		--keys 100000 \
-		--puts 500000 \
-		--report 5s \
-		--workers 10 ${HUMAN}
+		--puts 999999/5s \
+		--putters 10 \
+		--pcon 500000 \
+		--gets 999999/5s \
+		--getters 10 \
+		--gcon 500000 \
+		--dels 999999/5s \
+		--dellers 10 \
+		--dcon 500000 \
+		--report 5s ${HUMAN}
 
 wipe: ## remove all keys from the DB
 	kubectl exec -ti my-release-etcd-0 -- etcdctl del "" --from-key=true

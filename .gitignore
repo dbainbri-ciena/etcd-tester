@@ -1,2 +1,4 @@
 *.csv
 etcdtester
+*.swp
+*.[0-9]*
