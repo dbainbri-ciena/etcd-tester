@@ -75,6 +75,7 @@ type configSpec struct {
 	DelFrequency   Frequency
 	DelWorkerCount int
 	KeyCount       int
+	OverlapKeys    bool
 	ReportInterval time.Duration
 	DefragInterval time.Duration
 	DefragTimeout  time.Duration
@@ -174,6 +175,8 @@ func main() {
 		"number of worker threads to used to make DEL requests")
 	flag.IntVar(&config.KeyCount, "keys", 10,
 		"number of keys that should be used for PUT requests")
+	flag.BoolVar(&config.OverlapKeys, "overlap", false,
+		"should all PUT threads write to same set of keys")
 	flag.DurationVar(&config.ReportInterval, "report", 5*time.Second,
 		"interval at which statistics should be output")
 	flag.DurationVar(&config.DefragInterval, "defrag", 5*time.Minute,
@@ -237,14 +240,18 @@ func main() {
 	// of keys are PUT we will go back to random keys. First we create
 	// an shuffle the list of keys
 	perWorker := config.KeyCount / config.PutWorkerCount
+	keyIdx := 0
+	endIdx := config.KeyCount
 
 	jsonString := string(jsonBytes)
 	// Kick off workers
 	for j := 0; j < config.PutWorkerCount; j++ {
 
 		// Create a range of keys for each worker
-		keyIdx := j * perWorker
-		endIdx := (j + 1) * perWorker
+		if !config.OverlapKeys {
+			keyIdx = j * perWorker
+			endIdx = (j + 1) * perWorker
+		}
 		go config.runWorker(ctx, PUT, config.PutFrequency, ch, &workWG,
 			func(ctx context.Context, cli *clientv3.Client, key string) error {
 				var err error

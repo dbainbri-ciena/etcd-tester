@@ -12,6 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+KEYS?=0
+
+ifeq (${KEYS},0)
+KEYS_SMALL=10
+KEYS_MEDIUM=1000
+KEYS_MEDIUM_LARGE=1000
+KEYS_LARGE=100000
+else
+KEYS_SMALL=${KEYS}
+KEYS_MEDIUM=${KEYS}
+KEYS_MEDIUM_LARGE=${KEYS}
+KEYS_LARGE=${KEYS}
+endif
+
 .DEFAULT_GOAL:=help
 .PHONY: help
 help:  ## Display this help
@@ -85,7 +99,7 @@ test-small: ## 10 keys - 10 workers - 1000 puts
 		--defrag-timeout 10s \
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
-		--keys 10 \
+		--keys ${KEYS_SMALL} \
 		--puts 10/1s \
 		--putters 1 \
 		--gets 10/1s \
@@ -93,7 +107,7 @@ test-small: ## 10 keys - 10 workers - 1000 puts
 		--dels 10/1s \
 		--dellers 1 \
 		--pcon 50 --gcon 50 --dcon 50 \
-		--report 500ms ${HUMAN}
+		--report 500ms ${HUMAN} ${OVERLAP}
 
 test-medium: ## 1000 keys - 10 workers - 10000 puts
 	@./etcdtester \
@@ -102,7 +116,7 @@ test-medium: ## 1000 keys - 10 workers - 10000 puts
 		--defrag-timeout 10s \
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
-		--keys 1000 \
+		--keys ${KEYS_MEDIUM} \
 		--puts 999999/5s \
 		--putters 10 \
 		--pcon 10000 \
@@ -112,7 +126,7 @@ test-medium: ## 1000 keys - 10 workers - 10000 puts
 		--dels 999999/5s \
 		--dellers 10 \
 		--dcon 10000 \
-		--report 5s ${HUMAN}
+		--report 5s ${HUMAN} ${OVERLAP}
 
 test-medium-large: ## 1000 keys - 10 workers - 100000 puts
 	@./etcdtester \
@@ -121,7 +135,7 @@ test-medium-large: ## 1000 keys - 10 workers - 100000 puts
 		--defrag-timeout 10s \
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
-		--keys 1000 \
+		--keys ${KEYS_MEDIUM_LARGE} \
 		--puts 999999/5s \
 		--putters 10 \
 		--pcon 100000 \
@@ -131,7 +145,7 @@ test-medium-large: ## 1000 keys - 10 workers - 100000 puts
 		--dels 999999/5s \
 		--dellers 10 \
 		--dcon 100000 \
-		--report 5s ${HUMAN}
+		--report 5s ${HUMAN} ${OVERLAP}
 
 test-large: ## 100000 keys - 10 workers - 500000 puts
 	@./etcdtester \
@@ -140,7 +154,7 @@ test-large: ## 100000 keys - 10 workers - 500000 puts
 		--defrag-timeout 10s \
 		--endpoints localhost:2379,localhost:2479,localhost:2579 \
 		--etcd-timeout 10s \
-		--keys 100000 \
+		--keys ${KEYS_LARGE} \
 		--puts 999999/5s \
 		--putters 10 \
 		--pcon 500000 \
@@ -150,7 +164,7 @@ test-large: ## 100000 keys - 10 workers - 500000 puts
 		--dels 999999/5s \
 		--dellers 10 \
 		--dcon 500000 \
-		--report 5s ${HUMAN}
+		--report 5s ${HUMAN} ${OVERLAP}
 
 wipe: ## remove all keys from the DB
 	kubectl exec -ti my-release-etcd-0 -- etcdctl del "" --from-key=true
