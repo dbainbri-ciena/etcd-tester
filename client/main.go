@@ -65,27 +65,29 @@ func (f *Frequency) String() string {
 }
 
 type configSpec struct {
-	PutCondition   int
-	PutFrequency   Frequency
-	PutWorkerCount int
-	GetCondition   int
-	GetFrequency   Frequency
-	GetWorkerCount int
-	DelCondition   int
-	DelFrequency   Frequency
-	DelWorkerCount int
-	KeyCount       int
-	OverlapKeys    bool
-	ReportInterval time.Duration
-	DefragInterval time.Duration
-	DefragTimeout  time.Duration
-	DataFile       string
-	EtcdEndpoints  string
-	EtcdTimeout    time.Duration
-	HumanReadable  bool
+	PutCondition        int
+	PutFrequency        Frequency
+	PutWorkerCount      int
+	GetCondition        int
+	GetFrequency        Frequency
+	GetWorkerCount      int
+	DelCondition        int
+	DelFrequency        Frequency
+	DelWorkerCount      int
+	KeyCount            int
+	OverlapKeys         bool
+	ReportInterval      time.Duration
+	DefragInterval      time.Duration
+	DefragTimeout       time.Duration
+	DataFile            string
+	EtcdEndpoints       string
+	EtcdTimeout         time.Duration
+	HumanReadable       bool
+	TimeMeasurementUnit string
 
 	// --- implementation
 	endpoints []string
+	unit      time.Duration
 }
 
 const (
@@ -96,7 +98,16 @@ const (
 )
 
 var (
-	OpNames = []string{"STOP", "PUT", "GET", "DEL"}
+	OpNames     = []string{"STOP", "PUT", "GET", "DEL"}
+	UnitMapping = map[string]time.Duration{
+		"ns":          time.Nanosecond,
+		"nanosecond":  time.Nanosecond,
+		"µs":          time.Microsecond,
+		"us":          time.Microsecond,
+		"microsecond": time.Microsecond,
+		"ms":          time.Millisecond,
+		"millisecond": time.Millisecond,
+	}
 )
 
 type timingSample struct {
@@ -109,6 +120,19 @@ type stat struct {
 	min, max, last, avg time.Duration
 }
 
+func (c *configSpec) toMU(d time.Duration) int64 {
+	switch c.unit {
+	case time.Nanosecond:
+		return d.Nanoseconds()
+	case time.Microsecond:
+		return d.Microseconds()
+	case time.Millisecond:
+		fallthrough
+	default:
+		return d.Milliseconds()
+	}
+}
+
 func min(a, b int64) int64 {
 	if a < b {
 		return a
@@ -116,9 +140,9 @@ func min(a, b int64) int64 {
 	return b
 }
 
-func avg(sum time.Duration, count int64) time.Duration {
+func (c *configSpec) avg(sum time.Duration, count int64) time.Duration {
 	if count > 0 {
-		return time.Duration(sum.Milliseconds()/count) * time.Millisecond
+		return time.Duration(c.toMU(sum)/count) * c.unit
 	}
 	return 0
 }
@@ -191,6 +215,8 @@ func main() {
 		"duration at which a call to etcd will timeout")
 	flag.BoolVar(&config.HumanReadable, "human", false,
 		"should output be human readable")
+	flag.StringVar(&config.TimeMeasurementUnit, "unit", "ms",
+		"granularity of time measurements")
 	flag.Parse()
 
 	// convert string specifications of end points into string slice
@@ -199,6 +225,13 @@ func main() {
 	}
 	if len(config.endpoints) == 0 {
 		log.Fatal("ERROR: at least one etcd endpoint must be specified")
+	}
+
+	// parse the measurement unit option
+	if val, ok := UnitMapping[config.TimeMeasurementUnit]; ok {
+		config.unit = val
+	} else {
+		log.Fatalf("ERROR: unknown measurement unit specified ('%s'), valid value are 'ns', 'us', and 'ms'", config.TimeMeasurementUnit)
 	}
 
 	// read/parse JSON object to write to KV store
@@ -394,28 +427,28 @@ func (c *configSpec) runStatus(ch <-chan timingSample, wg *sync.WaitGroup) {
 				fmt.Fprintf(os.Stdout, "%s,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v,%v\n",
 					time.Now().Format("15:04:05"),
 					stats[PUT].min, stats[PUT].max, stats[PUT].last,
-					avg(stats[PUT].avg, stats[PUT].count),
+					c.avg(stats[PUT].avg, stats[PUT].count),
 					stats[GET].min, stats[GET].max, stats[GET].last,
-					avg(stats[GET].avg, stats[GET].count),
+					c.avg(stats[GET].avg, stats[GET].count),
 					stats[DEL].min, stats[DEL].max, stats[DEL].last,
-					avg(stats[DEL].avg, stats[DEL].count),
+					c.avg(stats[DEL].avg, stats[DEL].count),
 					bs.New(float64(dbSize)),
 				)
 			} else {
 				fmt.Fprintf(os.Stdout, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 					time.Now().Format("15:04:05"),
-					stats[PUT].min.Milliseconds(),
-					stats[PUT].max.Milliseconds(),
-					stats[PUT].last.Milliseconds(),
-					avg(stats[PUT].avg, stats[PUT].count).Milliseconds(),
-					stats[GET].min.Milliseconds(),
-					stats[GET].max.Milliseconds(),
-					stats[GET].last.Milliseconds(),
-					avg(stats[GET].avg, stats[GET].count).Milliseconds(),
-					stats[DEL].min.Milliseconds(),
-					stats[DEL].max.Milliseconds(),
-					stats[DEL].last.Milliseconds(),
-					avg(stats[DEL].avg, stats[DEL].count).Milliseconds(),
+					c.toMU(stats[PUT].min),
+					c.toMU(stats[PUT].max),
+					c.toMU(stats[PUT].last),
+					c.toMU(c.avg(stats[PUT].avg, stats[PUT].count)),
+					c.toMU(stats[GET].min),
+					c.toMU(stats[GET].max),
+					c.toMU(stats[GET].last),
+					c.toMU(c.avg(stats[GET].avg, stats[GET].count)),
+					c.toMU(stats[DEL].min),
+					c.toMU(stats[DEL].max),
+					c.toMU(stats[DEL].last),
+					c.toMU(c.avg(stats[DEL].avg, stats[DEL].count)),
 					dbSize,
 				)
 			}
