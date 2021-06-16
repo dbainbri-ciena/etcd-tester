@@ -24,13 +24,15 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/coreos/etcd/clientv3"
 	bs "github.com/inhies/go-bytesize"
+	"go.etcd.io/etcd/clientv3"
 )
 
 type Frequency struct {
@@ -137,6 +139,41 @@ type stat struct {
 	etcd struct {
 		min, max, last, avg time.Duration
 	}
+}
+
+func mapKeysAsDescription(conjunction string, in interface{}) string {
+	var result strings.Builder
+
+	inValue := reflect.ValueOf(in)
+
+	if inValue.Kind() != reflect.Map {
+		return ""
+	}
+
+	// fetch the keys and sort them
+	keys := inValue.MapKeys()
+	sort.Slice(keys, func(a, b int) bool {
+		return keys[a].String() < keys[b].String()
+	})
+
+	// walk the keys and add them to the result
+	// string. add the commas and "and" where
+	// appropriate
+	for keyIndex, key := range keys {
+		if keyIndex != 0 {
+			if len(keys) > 2 {
+				result.WriteString(", ")
+			} else {
+				result.WriteString(" ")
+			}
+		}
+		if keyIndex == len(keys)-1 && len(keys) > 1 {
+			result.WriteString(conjunction)
+			result.WriteString(" ")
+		}
+		result.WriteString(fmt.Sprintf("'%s'", key.String()))
+	}
+	return result.String()
 }
 
 func (c *configSpec) toMU(d time.Duration) int64 {
@@ -268,7 +305,8 @@ func main() {
 	flag.StringVar(&config.TimeMeasurementUnit, "unit", "ms",
 		"granularity of time measurements")
 	flag.StringVar(&config.EtcdConnection, "connection", "pooled",
-		"all PUT, GET, and DEL operations use a pooled, shared, robin, or separated connection to etcd")
+		fmt.Sprintf("all PUT, GET, and DEL operations use a %s connection to etcd",
+			mapKeysAsDescription("or", ConnectionMapping)))
 	flag.IntVar(&config.PoolCapacity, "pool", 200,
 		"the capacity of the connection pool when using 'pooled' or 'robin' etcd connection type")
 	flag.Parse()
@@ -285,11 +323,13 @@ func main() {
 	if val, ok := UnitMapping[strings.ToLower(config.TimeMeasurementUnit)]; ok {
 		config.unit = val
 	} else {
-		log.Fatalf("ERROR: unknown measurement unit specified ('%s'), valid value are 'ns', 'us', and 'ms'", config.TimeMeasurementUnit)
+		log.Fatalf("ERROR: unknown measurement unit specified ('%s'), valid value are %s",
+			config.TimeMeasurementUnit, mapKeysAsDescription("and", UnitMapping))
 	}
 
 	if _, ok := ConnectionMapping[strings.ToLower(config.EtcdConnection)]; !ok {
-		log.Fatalf("ERROR: unknown etcd connection type specified ('%s'), valid values are 'pooled', 'shared', 'separate'", config.EtcdConnection)
+		log.Fatalf("ERROR: unknown etcd connection type specified ('%s'), valid values are %s",
+			config.EtcdConnection, mapKeysAsDescription("and", ConnectionMapping))
 	}
 
 	// if data size > 0 then we use that

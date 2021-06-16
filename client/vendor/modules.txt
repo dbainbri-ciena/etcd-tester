@@ -1,7 +1,6 @@
 # github.com/coreos/etcd v3.3.25+incompatible
 ## explicit
 github.com/coreos/etcd/auth/authpb
-github.com/coreos/etcd/clientv3
 github.com/coreos/etcd/clientv3/balancer
 github.com/coreos/etcd/clientv3/balancer/connectivity
 github.com/coreos/etcd/clientv3/balancer/picker
@@ -43,6 +42,11 @@ github.com/google/uuid
 # github.com/inhies/go-bytesize v0.0.0-20201103132853-d0aed0d254f8
 ## explicit
 github.com/inhies/go-bytesize
+# go.etcd.io/bbolt v1.3.6
+## explicit
+# go.etcd.io/etcd v3.3.25+incompatible
+## explicit
+go.etcd.io/etcd/clientv3
 # go.uber.org/atomic v1.7.0
 go.uber.org/atomic
 # go.uber.org/multierr v1.6.0
